@@ -5,165 +5,277 @@
 #include <algorithm>
 #include <map>
 #include <fstream>
-#include <windows.h>
-#include <limits> // додано
+#include <limits>
+#include <iomanip>
 
 using namespace std;
 
-class Transaction {
-public:
+enum class WalletType { DEBIT, CREDIT };
+
+struct Transaction {
     string category;
     double amount;
     time_t date;
     bool isExpense;
+    string walletName;
 
-    Transaction(const string& cat, double amt, bool expense)
-        : category(cat), amount(amt), isExpense(expense) {
-        date = time(nullptr);
+    Transaction() = default;
+    Transaction(const string& wname, const string& cat, double amt, bool expense)
+        : category(cat), amount(amt), date(time(nullptr)), isExpense(expense), walletName(wname) {
     }
 };
 
 class Wallet {
 private:
     string name;
+    WalletType type;
     double balance;
+    double creditLimit;
     vector<Transaction> transactions;
 
 public:
-    Wallet(const string& n) : name(n), balance(0) {}
+    Wallet(const string& n, WalletType t, double creditLim = 0.0)
+        : name(n), type(t), balance(0.0), creditLimit(creditLim) {
+    }
+
+    const string& getName() const { return name; }
+    WalletType getType() const { return type; }
+    double getBalance() const { return balance; }
+    double getCreditLimit() const { return creditLimit; }
+    vector<Transaction>& getTransactions() { return transactions; }
+    const vector<Transaction>& getTransactionsConst() const { return transactions; }
 
     void deposit(double amt) {
+        if (amt <= 0) return;
         balance += amt;
-        transactions.push_back(Transaction("Поповнення", amt, false));
+        transactions.emplace_back(name, "Deposit", amt, false);
     }
 
     bool spend(double amt, const string& category) {
-        if (amt > balance) return false;
-        balance -= amt;
-        transactions.push_back(Transaction(category, amt, true));
-        return true;
+        if (amt <= 0) return false;
+        if (type == WalletType::DEBIT) {
+            if (amt > balance) return false;
+            balance -= amt;
+            transactions.emplace_back(name, category, amt, true);
+            return true;
+        }
+        else { // CREDIT
+            if (balance - amt < -creditLimit) return false;
+            balance -= amt;
+            transactions.emplace_back(name, category, amt, true);
+            return true;
+        }
     }
-
-    double getBalance() const { return balance; }
-    string getName() const { return name; }
-    const vector<Transaction>& getTransactions() const { return transactions; }
 };
 
 class FinanceManager {
 private:
     vector<Wallet> wallets;
 
-    time_t periodStart(int periodDays) const {
-        time_t now = time(nullptr);
-        return now - periodDays * 24 * 60 * 60;
+    static time_t nowTime() {
+        return time(nullptr);
+    }
+
+    static time_t periodStartDays(int days) {
+        if (days <= 0) return 0;
+        time_t now = nowTime();
+        return now - static_cast<time_t>(days) * 24 * 60 * 60;
+    }
+
+    static string formatTime(time_t t) {
+        if (t == 0) return string("-");
+        tm local_tm;
+#if defined(_MSC_VER)
+        localtime_s(&local_tm, &t);
+#else
+        localtime_r(&t, &local_tm);
+#endif
+        char buf[64];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local_tm);
+        return string(buf);
     }
 
 public:
-    void addWallet(const string& name) {
-        wallets.push_back(Wallet(name));
+    bool addWallet(const string& name, WalletType type, double creditLimit = 0.0) {
+        if (getWallet(name) != nullptr) return false;
+        wallets.emplace_back(name, type, creditLimit);
+        return true;
     }
 
     Wallet* getWallet(const string& name) {
         for (auto& w : wallets)
-            if (w.getName() == name)
-                return &w;
+            if (w.getName() == name) return &w;
         return nullptr;
     }
 
-    void showAllTransactions(int periodDays = 0) const {
-        time_t start = (periodDays > 0) ? periodStart(periodDays) : 0;
-        for (const auto& w : wallets) { // виправлено
-            cout << "\nГаманець: " << w.getName() << " | Баланс: " << w.getBalance() << "\n";
-            const auto& t = w.getTransactions();
-            bool empty = true;
-            for (const auto& tr : t) { // виправлено
-                if (periodDays == 0 || tr.date >= start) {
-                    tm* timeinfo = localtime(&tr.date);
-                    char buffer[20];
-                    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", timeinfo);
-                    cout << (tr.isExpense ? "Витрата" : "Поповнення")
-                        << " | Категорія: " << tr.category
-                        << " | Сума: " << tr.amount
-                        << " | Дата: " << buffer << "\n";
-                    empty = false;
-                }
-            }
-            if (empty) cout << "Транзакції відсутні за обраний період.\n";
+    const vector<Wallet>& getAllWallets() const { return wallets; }
+
+    void depositToWallet(const string& name, double amt) {
+        Wallet* w = getWallet(name);
+        if (!w) { cout << "Wallet not found.\n"; return; }
+        w->deposit(amt);
+        cout << "Deposit successful. Balance: " << fixed << setprecision(2) << w->getBalance() << "\n";
+    }
+
+    void spendFromWallet(const string& name, double amt, const string& category) {
+        Wallet* w = getWallet(name);
+        if (!w) { cout << "Wallet not found.\n"; return; }
+        if (w->spend(amt, category)) {
+            cout << "Expense added. Balance: " << fixed << setprecision(2) << w->getBalance() << "\n";
+        }
+        else {
+            cout << "Insufficient funds or credit limit.\n";
         }
     }
 
-    void saveReport(const string& filename, int periodDays = 0) const {
-        ofstream fout(filename);
-        if (!fout) { cout << "Помилка відкриття файлу!\n"; return; }
-        time_t start = (periodDays > 0) ? periodStart(periodDays) : 0;
-
-        for (const auto& w : wallets) { // виправлено
-            fout << "\nГаманець: " << w.getName() << " | Баланс: " << w.getBalance() << "\n";
-            const auto& t = w.getTransactions();
+    void showAllTransactions(int days = 0) const {
+        time_t start = (days > 0) ? periodStartDays(days) : 0;
+        bool any = false;
+        for (const auto& w : wallets) {
+            cout << "\nWallet: " << w.getName()
+                << " | Type: " << (w.getType() == WalletType::DEBIT ? "DEBIT" : "CREDIT")
+                << " | Balance: " << fixed << setprecision(2) << w.getBalance() << "\n";
+            const auto& tr = w.getTransactionsConst();
             bool empty = true;
-            for (const auto& tr : t) { // виправлено
-                if (periodDays == 0 || tr.date >= start) {
-                    tm* timeinfo = localtime(&tr.date);
-                    char buffer[20];
-                    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", timeinfo);
-                    fout << (tr.isExpense ? "Витрата" : "Поповнення")
-                        << " | Категорія: " << tr.category
-                        << " | Сума: " << tr.amount
-                        << " | Дата: " << buffer << "\n";
+            for (const auto& t : tr) {
+                if (start == 0 || t.date >= start) {
+                    cout << (t.isExpense ? "Expense" : "Deposit")
+                        << " | Wallet: " << t.walletName
+                        << " | Category: " << t.category
+                        << " | Amount: " << fixed << setprecision(2) << t.amount
+                        << " | Date: " << formatTime(t.date) << "\n";
+                    empty = false;
+                    any = true;
+                }
+            }
+            if (empty) cout << "  No transactions for the selected period.\n";
+        }
+        if (!any) cout << "\nNo transactions found for the selected period.\n";
+    }
+
+    void saveReportToFile(const string& filename, int days = 0) const {
+        ofstream fout(filename);
+        if (!fout) {
+            cout << "Failed to open file for writing\n";
+            return;
+        }
+        time_t start = (days > 0) ? periodStartDays(days) : 0;
+        fout << "REPORT (period days: " << days << ")\n";
+        for (const auto& w : wallets) {
+            fout << "\nWallet: " << w.getName() << " | Type: "
+                << (w.getType() == WalletType::DEBIT ? "DEBIT" : "CREDIT")
+                << " | Balance: " << fixed << setprecision(2) << w.getBalance() << "\n";
+            const auto& tr = w.getTransactionsConst();
+            bool empty = true;
+            for (const auto& t : tr) {
+                if (start == 0 || t.date >= start) {
+                    fout << (t.isExpense ? "Expense" : "Deposit")
+                        << " | Wallet: " << t.walletName
+                        << " | Category: " << t.category
+                        << " | Amount: " << fixed << setprecision(2) << t.amount
+                        << " | Date: " << formatTime(t.date) << "\n";
                     empty = false;
                 }
             }
-            if (empty) fout << "Транзакції відсутні за обраний період.\n";
+            if (empty) fout << "  No transactions for the selected period.\n";
         }
         fout.close();
-        cout << "Звіт збережено у файл " << filename << "\n";
+        cout << "Report saved to file: " << filename << "\n";
     }
 
-    void topExpenses(int periodDays = 0, int n = 3) const {
-        time_t start = (periodDays > 0) ? periodStart(periodDays) : 0;
+    vector<Transaction> collectTransactions(int days = 0) const {
+        time_t start = (days > 0) ? periodStartDays(days) : 0;
+        vector<Transaction> all;
+        for (const auto& w : wallets) {
+            for (const auto& t : w.getTransactionsConst()) {
+                if (start == 0 || t.date >= start) all.push_back(t);
+            }
+        }
+        return all;
+    }
+
+    vector<Transaction> topExpenses(int days = 0, int topN = 3) const {
+        auto all = collectTransactions(days);
         vector<Transaction> expenses;
-        for (const auto& w : wallets) // виправлено
-            for (const auto& tr : w.getTransactions()) // виправлено
-                if (tr.isExpense && (periodDays == 0 || tr.date >= start))
-                    expenses.push_back(tr);
+        for (const auto& t : all) if (t.isExpense) expenses.push_back(t);
+        sort(expenses.begin(), expenses.end(), [](const Transaction& a, const Transaction& b) {
+            return a.amount > b.amount;
+            });
+        if ((int)expenses.size() > topN) expenses.resize(topN);
+        return expenses;
+    }
 
-        sort(expenses.begin(), expenses.end(), [](const Transaction& a, const Transaction& b) { return a.amount > b.amount; });
+    vector<pair<string, double>> topCategories(int days = 0, int topN = 3) const {
+        auto all = collectTransactions(days);
+        map<string, double> sums;
+        for (const auto& t : all) if (t.isExpense) sums[t.category] += t.amount;
+        vector<pair<string, double>> vec(sums.begin(), sums.end());
+        sort(vec.begin(), vec.end(), [](const pair<string, double>& a, const pair<string, double>& b) {
+            return a.second > b.second;
+            });
+        if ((int)vec.size() > topN) vec.resize(topN);
+        return vec;
+    }
 
-        cout << "\nТОП-" << n << " витрат:\n";
-        for (int i = 0; i < min(n, (int)expenses.size()); i++) {
-            tm* timeinfo = localtime(&expenses[i].date);
-            char buffer[20];
-            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", timeinfo);
-            cout << i + 1 << ". " << expenses[i].category << " | "
-                << expenses[i].amount << " | " << buffer << "\n";
+    void saveTopExpensesToFile(const string& filename, int days = 0, int topN = 3) const {
+        ofstream fout(filename);
+        if (!fout) { cout << "Failed to open file for writing\n"; return; }
+        fout << "TOP-" << topN << " EXPENSES (last " << days << " days)\n";
+        auto top = topExpenses(days, topN);
+        if (top.empty()) fout << "No expenses for the period.\n";
+        for (size_t i = 0; i < top.size(); ++i) {
+            fout << i + 1 << ". Wallet: " << top[i].walletName
+                << " | Category: " << top[i].category
+                << " | Amount: " << fixed << setprecision(2) << top[i].amount
+                << " | Date: " << formatTime(top[i].date) << "\n";
+        }
+        fout.close();
+        cout << "Top expenses saved to file: " << filename << "\n";
+    }
+
+    void saveTopCategoriesToFile(const string& filename, int days = 0, int topN = 3) const {
+        ofstream fout(filename);
+        if (!fout) { cout << "Failed to open file for writing\n"; return; }
+        fout << "TOP-" << topN << " CATEGORIES (last " << days << " days)\n";
+        auto top = topCategories(days, topN);
+        if (top.empty()) fout << "No expenses for the period.\n";
+        for (size_t i = 0; i < top.size(); ++i) {
+            fout << i + 1 << ". Category: " << top[i].first
+                << " | Sum: " << fixed << setprecision(2) << top[i].second << "\n";
+        }
+        fout.close();
+        cout << "Top categories saved to file: " << filename << "\n";
+    }
+
+    void printTopExpensesConsole(int days = 0, int topN = 3) const {
+        auto top = topExpenses(days, topN);
+        cout << "\n== TOP-" << topN << " expenses (last " << (days == 0 ? "all time" : to_string(days) + " days") << ") ==\n";
+        if (top.empty()) { cout << "No expenses for the period.\n"; return; }
+        for (size_t i = 0; i < top.size(); ++i) {
+            cout << i + 1 << ". Wallet: " << top[i].walletName
+                << " | Category: " << top[i].category
+                << " | Amount: " << fixed << setprecision(2) << top[i].amount
+                << " | Date: " << formatTime(top[i].date) << "\n";
         }
     }
 
-    void topCategories(int periodDays = 0, int n = 3) const {
-        time_t start = (periodDays > 0) ? periodStart(periodDays) : 0;
-        map<string, double> catSum;
-        for (const auto& w : wallets) // виправлено
-            for (const auto& tr : w.getTransactions()) // виправлено
-                if (tr.isExpense && (periodDays == 0 || tr.date >= start))
-                    catSum[tr.category] += tr.amount;
-
-        vector<pair<string, double>> sorted(catSum.begin(), catSum.end());
-        sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.second > b.second; });
-
-        cout << "\nТОП-" << n << " категорій:\n";
-        for (int i = 0; i < min(n, (int)sorted.size()); i++)
-            cout << i + 1 << ". " << sorted[i].first << " | " << sorted[i].second << "\n";
+    void printTopCategoriesConsole(int days = 0, int topN = 3) const {
+        auto top = topCategories(days, topN);
+        cout << "\n== TOP-" << topN << " categories (last " << (days == 0 ? "all time" : to_string(days) + " days") << ") ==\n";
+        if (top.empty()) { cout << "No expenses for the period.\n"; return; }
+        for (size_t i = 0; i < top.size(); ++i) {
+            cout << i + 1 << ". Category: " << top[i].first
+                << " | Sum: " << fixed << setprecision(2) << top[i].second << "\n";
+        }
     }
 };
 
-int choosePeriod() {
-    int choice;
-    cout << "\nОберіть період:\n";
-    cout << "1. День\n2. Тиждень\n3. Місяць\n0. Всі часи\n";
-    cout << "Ваш вибір: ";
-    cin >> choice;
+int choosePeriodDays() {
+    cout << "\nChoose period:\n1) Day\n2) Week\n3) Month\n0) All time\nYour choice: ";
+    int ch;
+    if (!(cin >> ch)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); return 0; }
     cin.ignore(numeric_limits<streamsize>::max(), '\n');
-    switch (choice) {
+    switch (ch) {
     case 1: return 1;
     case 2: return 7;
     case 3: return 30;
@@ -171,85 +283,154 @@ int choosePeriod() {
     }
 }
 
+// Р¤СѓРЅРєС†С–СЏ РґР»СЏ РґРѕРґР°РІР°РЅРЅСЏ С‚РµСЃС‚РѕРІРёС… С‚СЂР°РЅР·Р°РєС†С–Р№ Р· СЂС–Р·РЅРёРјРё РґР°С‚Р°РјРё
+void addDemoTransactions(FinanceManager& fm) {
+    // Р”Р»СЏ Cash
+    Wallet* w = fm.getWallet("Cash");
+    if (w) {
+        w->deposit(500); // СЃСЊРѕРіРѕРґРЅС–
+        Transaction t1("Cash", "Food", 120, true); t1.date = time(nullptr) - 24 * 60 * 60; // 1 РґРµРЅСЊ РЅР°Р·Р°Рґ
+        w->getTransactions().push_back(t1);
+        Transaction t2("Cash", "Taxi", 50, true); t2.date = time(nullptr) - 8 * 24 * 60 * 60; // 8 РґРЅС–РІ РЅР°Р·Р°Рґ
+        w->getTransactions().push_back(t2);
+        Transaction t3("Cash", "Coffee", 15, true); t3.date = time(nullptr) - 30 * 24 * 60 * 60; // 30 РґРЅС–РІ РЅР°Р·Р°Рґ
+        w->getTransactions().push_back(t3);
+    }
+    // Р”Р»СЏ VISA_Card
+    Wallet* v = fm.getWallet("VISA_Card");
+    if (v) {
+        v->deposit(1000); // СЃСЊРѕРіРѕРґРЅС–
+        Transaction t1("VISA_Card", "Groceries", 250, true); t1.date = time(nullptr) - 3 * 24 * 60 * 60; // 3 РґРЅС– РЅР°Р·Р°Рґ
+        v->getTransactions().push_back(t1);
+        Transaction t2("VISA_Card", "Sport", 100, true); t2.date = time(nullptr) - 16 * 24 * 60 * 60; // 16 РґРЅС–РІ РЅР°Р·Р°Рґ
+        v->getTransactions().push_back(t2);
+    }
+    // Р”Р»СЏ Credit_MC
+    Wallet* c = fm.getWallet("Credit_MC");
+    if (c) {
+        c->deposit(700); // СЃСЊРѕРіРѕРґРЅС–
+        Transaction t1("Credit_MC", "Electronics", 400, true); t1.date = time(nullptr) - 5 * 24 * 60 * 60; // 5 РґРЅС–РІ РЅР°Р·Р°Рґ
+        c->getTransactions().push_back(t1);
+        Transaction t2("Credit_MC", "Travel", 300, true); t2.date = time(nullptr) - 31 * 24 * 60 * 60; // 31 РґРµРЅСЊ РЅР°Р·Р°Рґ
+        c->getTransactions().push_back(t2);
+    }
+}
+
 int main() {
-    SetConsoleCP(1251);
-    SetConsoleOutputCP(1251);
-    system("color 0A");
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
 
     FinanceManager fm;
-    int choice;
+    cout << "=== Personal Finance Management System ===\n";
 
-    do {
-        cout << "\n--- МЕНЮ ---\n";
-        cout << "1. Додати гаманець/картку\n";
-        cout << "2. Поповнити гаманець/картку\n";
-        cout << "3. Додати витрату\n";
-        cout << "4. Показати всі транзакції\n";
-        cout << "5. ТОП-3 витрат\n";
-        cout << "6. ТОП-3 категорій\n";
-        cout << "7. Зберегти звіт у файл\n";
-        cout << "0. Вихід\n";
-        cout << "Ваш вибір: ";
-        cin >> choice;
+    // sample wallets
+    fm.addWallet("Cash", WalletType::DEBIT);
+    fm.addWallet("VISA_Card", WalletType::DEBIT);
+    fm.addWallet("Credit_MC", WalletType::CREDIT, 1000.0);
+
+    // Р”РѕРґР°С”РјРѕ С‚РµСЃС‚РѕРІС– С‚СЂР°РЅР·Р°РєС†С–С— РґР»СЏ РґРµРјРѕРЅСЃС‚СЂР°С†С–С— С„С–Р»СЊС‚СЂР°С†С–С—
+    addDemoTransactions(fm);
+
+    while (true) {
+        cout << "\n--- MENU ---\n";
+        cout << "1. Add wallet/card\n";
+        cout << "2. Deposit to wallet/card\n";
+        cout << "3. Add expense\n";
+        cout << "4. Show all transactions (by period)\n";
+        cout << "5. Show TOP-3 expenses (week/month)\n";
+        cout << "6. Show TOP-3 categories (week/month)\n";
+        cout << "7. Save report to file\n";
+        cout << "8. Save TOP-3 expenses to file (week/month)\n";
+        cout << "9. Save TOP-3 categories to file (week/month)\n";
+        cout << "0. Exit\n";
+        cout << "Choice: ";
+
+        int choice;
+        if (!(cin >> choice)) {
+            cin.clear();
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Invalid input\n";
+            continue;
+        }
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
+        if (choice == 0) break;
 
         if (choice == 1) {
             string name;
-            cout << "Назва гаманця/картки: ";
+            cout << "Enter wallet/card name: ";
             getline(cin, name);
-            fm.addWallet(name);
-            cout << "Гаманець додано!\n";
+            cout << "Type (1=DEBIT, 2=CREDIT): ";
+            int t; cin >> t; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            if (t == 1) {
+                if (fm.addWallet(name, WalletType::DEBIT)) cout << "DEBIT wallet added\n";
+                else cout << "Wallet with this name already exists\n";
+            }
+            else {
+                double lim; cout << "Enter credit limit (e.g. 1000): "; cin >> lim; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+                if (fm.addWallet(name, WalletType::CREDIT, lim)) cout << "CREDIT card added\n";
+                else cout << "Wallet with this name already exists\n";
+            }
         }
         else if (choice == 2) {
-            string name;
-            cout << "Назва гаманця/картки: ";
-            getline(cin, name);
-            Wallet* w = fm.getWallet(name);
-            if (!w) { cout << "Гаманець не знайдено!\n"; continue; }
-            double amount;
-            cout << "Сума поповнення: ";
-            cin >> amount;
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
-            w->deposit(amount);
-            cout << "Поповнення успішне!\n";
+            string name; double amt;
+            cout << "Wallet/card name to deposit into: "; getline(cin, name);
+            cout << "Deposit amount: "; cin >> amt; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            fm.depositToWallet(name, amt);
         }
         else if (choice == 3) {
-            string name, category;
-            cout << "Назва гаманця/картки: ";
-            getline(cin, name);
-            Wallet* w = fm.getWallet(name);
-            if (!w) { cout << "Гаманець не знайдено!\n"; continue; }
-            double amount;
-            cout << "Сума витрати: ";
-            cin >> amount;
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
-            cout << "Категорія: ";
-            getline(cin, category);
-            if (!w->spend(amount, category)) cout << "Недостатньо коштів!\n";
-            else cout << "Витрата додана!\n";
+            string name, cat; double amt;
+            cout << "Wallet/card name for expense: "; getline(cin, name);
+            cout << "Expense amount: "; cin >> amt; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Expense category (e.g. Groceries, Transport): "; getline(cin, cat);
+            fm.spendFromWallet(name, amt, cat);
         }
         else if (choice == 4) {
-            int period = choosePeriod();
-            fm.showAllTransactions(period);
+            int days = choosePeriodDays();
+            fm.showAllTransactions(days);
         }
         else if (choice == 5) {
-            int period = choosePeriod();
-            fm.topExpenses(period);
+            cout << "1) Week  2) Month  0) All time\nYour choice: ";
+            int ch; cin >> ch; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            int days = (ch == 1 ? 7 : (ch == 2 ? 30 : 0));
+            fm.printTopExpensesConsole(days, 3);
         }
         else if (choice == 6) {
-            int period = choosePeriod();
-            fm.topCategories(period);
+            cout << "1) Week  2) Month  0) All time\nYour choice: ";
+            int ch; cin >> ch; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            int days = (ch == 1 ? 7 : (ch == 2 ? 30 : 0));
+            fm.printTopCategoriesConsole(days, 3);
         }
         else if (choice == 7) {
-            int period = choosePeriod();
+            int days = choosePeriodDays();
             string filename;
-            cout << "Назва файлу: ";
+            cout << "Filename for report (e.g. report.txt): ";
             getline(cin, filename);
-            fm.saveReport(filename, period);
+            fm.saveReportToFile(filename, days);
         }
-        else if (choice != 0) cout << "Невірний вибір!\n";
+        else if (choice == 8) {
+            cout << "1) Week  2) Month  0) All time\nYour choice: ";
+            int ch; cin >> ch; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            int days = (ch == 1 ? 7 : (ch == 2 ? 30 : 0));
+            string filename;
+            cout << "Filename for TOP expenses (e.g. top_exp.txt): ";
+            getline(cin, filename);
+            fm.saveTopExpensesToFile(filename, days, 3);
+        }
+        else if (choice == 9) {
+            cout << "1) Week  2) Month  0) All time\nYour choice: ";
+            int ch; cin >> ch; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            int days = (ch == 1 ? 7 : (ch == 2 ? 30 : 0));
+            string filename;
+            cout << "Filename for TOP categories (e.g. top_cat.txt): ";
+            getline(cin, filename);
+            fm.saveTopCategoriesToFile(filename, days, 3);
+        }
+        else {
+            cout << "Unknown command\n";
+        }
+    }
 
-    } while (choice != 0);
-
+    cout << "Thank you! Goodbye.\n";
     return 0;
 }
